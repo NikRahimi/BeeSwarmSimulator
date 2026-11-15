@@ -3,17 +3,17 @@ package org.firstinspires.ftc.teamcode;
 import com.acmerobotics.roadrunner.Pose2d;
 import com.qualcomm.robotcore.eventloop.opmode.OpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
-import com.qualcomm.robotcore.hardware.DcMotor;
-import com.qualcomm.robotcore.util.Range;
-
-import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
-import org.firstinspires.ftc.robotcore.external.navigation.YawPitchRollAngles;
+import com.qualcomm.robotcore.hardware.DcMotorSimple;
 import com.qualcomm.robotcore.hardware.IMU;
 import com.qualcomm.hardware.rev.RevHubOrientationOnRobot;
 
+import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
 import org.firstinspires.ftc.teamcode.mechanisms.MecanumDrive;
 import com.qualcomm.robotcore.hardware.DcMotorEx;
 import com.qualcomm.robotcore.hardware.Servo;
+
+import com.acmerobotics.dashboard.FtcDashboard;
+import com.acmerobotics.dashboard.telemetry.TelemetryPacket;
 
 @TeleOp(name = "BLEW", group = "Competition")
 public class Blueee extends OpMode {
@@ -21,13 +21,15 @@ public class Blueee extends OpMode {
     // -------------------- VARIABLES --------------------
 
     MecanumDrive drive;
-    IMU imu; // Direct IMU instance to avoid pose conflicts
+    IMU imu; // Direct IMU instance
 
     // Hardware init
     private DcMotorEx intakeMotor;
     private DcMotorEx flyMotor;
     private DcMotorEx flyMotor2;
     private Servo keeperServo;
+    private Servo flowerServo;
+    private Servo flowerServo2;
 
     // AprilTag ID number (20 -> blue, 24 -> red)
     int tagNum = 20;
@@ -52,13 +54,9 @@ public class Blueee extends OpMode {
     double ticksPerSecond = 0.0;
     double maxTPS = 0.0;
 
-    // Servo positions
-    private static final double FLICKER_DEFAULT_POS = 0.0;
-    private static final double FLICKER_PRESSED_POS = 0.4;
-    double dx, dy, dz, tagDistanceM = 0.0;
-    boolean xNow;
-    boolean xLast = false;
-    boolean isUp = false;
+    // Servo toggle variables for flower servos
+    boolean flowerState = false;
+    boolean xLastState = false;
 
     // Driving setup
     double forward, strafe, rotate;
@@ -73,72 +71,80 @@ public class Blueee extends OpMode {
     // --------------------- MAIN LOOP ----------------------
     @Override
     public void loop() {
-        // 1. Keep Road Runner updating its internal dead-wheels tracking
+
+        FtcDashboard dashboard = FtcDashboard.getInstance();
+        TelemetryPacket packet = new TelemetryPacket();
+
+        // Keep Road Runner updating its internal tracking
         drive.updatePoseEstimate();
 
-        flyMotor.setVelocityPIDFCoefficients(80, 0, 10, 0); // Flywheel PID
+        // Retrieve the current pose safely from the localizer
+        Pose2d currentPose = drive.localizer.getPose();
 
-        // ---------------------- FIELD-CENTRIC DRIVE MATH ----------------------
-        // Read raw controller inputs (Invert Y because standard joysticks are pushed negative-up)
-        double rawForward = -gamepad1.left_stick_y;
-        double rawStrafe = gamepad1.left_stick_x;
-        rotate = gamepad1.right_stick_x;
+        // ---------------------- ROBOT-CENTRIC DRIVE ----------------------
+        forward = -gamepad1.left_stick_y;
+        rotate  = gamepad1.left_stick_x;
+        strafe  = gamepad1.right_stick_x;
 
-        // Reset heading calibration if driver presses the options/start button
-        if (gamepad1.options) {
-            imu.resetYaw();
-        }
+        drive.drive(forward, strafe, rotate);
+        // -----------------------------------------------------------------
 
-        // Fetch robot heading directly in radians from the Hub IMU (bypasses pose errors)
-        double botHeading = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
+        // ---------------------- Mechanism Inputs -------------------------
 
-        // Rotate movement vector components counter to the robot's current heading angle
-        forward = rawForward * Math.cos(-botHeading) - rawStrafe * Math.sin(-botHeading);
-        strafe  = rawForward * Math.sin(-botHeading) + rawStrafe * Math.cos(-botHeading);
-        // ----------------------------------------------------------------------
-
-        // Send field-centric inputs to drive class
-        drive.drive(forward, strafe, -rotate);
-
-        // ---------------------- Mechanism Inputs ---------------------------------------
-
+        // Flywheel Target RPM control via right bumper
         if (gamepad1.right_bumper) {
-            if (tagDistanceM < 170){
-                targetRPM = 3200;
-            } else if (tagDistanceM < 220){
-                targetRPM = 3500;
-            } else {
-                targetRPM = 3700;
-            }
+            targetRPM = 3150;
         } else {
             targetRPM = 0.0;
+        }
+
+        // Flower Servo Toggle Logic using Gamepad 1 X Button
+        boolean xPressedNow = gamepad1.x;
+        if (xPressedNow && !xLastState) {
+            flowerState = !flowerState; // Flip toggle state
+        }
+        xLastState = xPressedNow;
+
+        // Apply positions based on the toggle state (using valid 0.0 - 1.0 ranges)
+        if (flowerState) {
+            flowerServo.setPosition(0.75);   // Active position 1
+            flowerServo2.setPosition(0.75);  // Active position 2
+        } else {
+            flowerServo.setPosition(0.1);   // Home / Default position 1
+            flowerServo2.setPosition(0.1);  // Home / Default position 2
         }
 
         maxRPM = 6000.0;
         ticksPerSecond = (targetRPM * TICKS_PER_REV_FLY) / 60.0;
         maxTPS = (maxRPM * TICKS_PER_REV_FLY) / 60.0;
 
+        // Drive flywheels via velocity PID
         flyMotor.setVelocity(ticksPerSecond);
+        flyMotor2.setVelocity(ticksPerSecond);
 
+        // Intake control on Gamepad 1 A Button
         if (gamepad1.a) {
             intakeMotor.setPower(-1.0);
         } else {
             intakeMotor.setPower(0.0);
         }
 
-//        xNow = gamepad1.x;
-//        if (xNow && !xLast) {
-//            isUp = !isUp;
-//        }
-//        xLast = xNow;
-
+        // Keeper servo control on Gamepad 1 B Button
         if (gamepad1.b) {
-            keeperServo.setPosition(FLICKER_PRESSED_POS);
+            keeperServo.setPosition(0.75);
         } else {
-            keeperServo.setPosition(FLICKER_DEFAULT_POS);
+            keeperServo.setPosition(0.55);
         }
 
-        // --------------------------------------------------------------------------
+        // FTC Dashboard Telemetry Streaming
+        double actualRPM1 = (flyMotor.getVelocity() * 60.0) / TICKS_PER_REV_FLY;
+        double actualRPM2 = (flyMotor2.getVelocity() * 60.0) / TICKS_PER_REV_FLY;
+        packet.put("Target RPM", targetRPM);
+        packet.put("Actual RPM (Motor 1)", actualRPM1);
+        packet.put("Actual RPM (Motor 2)", actualRPM2);
+        dashboard.sendTelemetryPacket(packet);
+
+        // -----------------------------------------------------------------
 
         // PD tuning inputs (Gamepad 2)
         if (gamepad2.bWasPressed()) {stepIndex = (stepIndex + 1) % stepSizes.length;}
@@ -149,16 +155,21 @@ public class Blueee extends OpMode {
         if (gamepad2.y) {kF += stepSizes[stepIndex];}
         if (gamepad2.a) {kF -= stepSizes[stepIndex];}
 
-        // Telemetry
+        // Driver Station Telemetry
         double headingDeg = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.DEGREES);
         telemetry.addData("Heading (Deg)", "%.2f", headingDeg);
         telemetry.addLine("----------------------");
         telemetry.addData("Target RPM", targetRPM);
         telemetry.addData("TPS", ticksPerSecond);
+        telemetry.addData("Leader Power", "%.2f", flyMotor.getPower());
+        telemetry.addData("Flower State", flowerState ? "Active" : "Home");
         telemetry.addData("Tuning P", "%.4f (D-Pad L/R)", kP);
         telemetry.addData("Tuning D", "%.4f (D-Pad U/D)", kD);
         telemetry.addData("Tuning F", "%.4f", kF);
         telemetry.addData("Step Size", "%.4f (B)", stepSizes[stepIndex]);
+        telemetry.addData("RR X (Inches)", "%.2f", currentPose.position.x);
+        telemetry.addData("RR Y (Inches)", "%.2f", currentPose.position.y);
+        telemetry.addData("RR Heading (Deg)", "%.2f", Math.toDegrees(currentPose.heading.toDouble()));
         telemetry.update();
     }
     // --------------------------------------------------
@@ -169,7 +180,6 @@ public class Blueee extends OpMode {
         drive = new MecanumDrive(hardwareMap, new Pose2d(0, 0, 0));
         drive.init();
 
-        // Initialize the IMU directly from hardwareMap for field-centric orientation
         imu = hardwareMap.get(IMU.class, "imu");
         IMU.Parameters parameters = new IMU.Parameters(new RevHubOrientationOnRobot(
                 RevHubOrientationOnRobot.LogoFacingDirection.UP,
@@ -178,11 +188,26 @@ public class Blueee extends OpMode {
         imu.initialize(parameters);
 
         intakeMotor = hardwareMap.get(DcMotorEx.class, "intakeMotor");
-        flyMotor = hardwareMap.get(DcMotorEx.class, "flyMotor");
         keeperServo = hardwareMap.get(Servo.class, "keeperServo");
+        flyMotor = hardwareMap.get(DcMotorEx.class, "flyMotor");
+        flyMotor2 = hardwareMap.get(DcMotorEx.class, "flyMotor2");
+        flowerServo = hardwareMap.get(Servo.class, "flowerServo");
+        flowerServo2 = hardwareMap.get(Servo.class, "flowerServo2");
 
+        // Leader motor manages velocity PID with encoder active
         flyMotor.setMode(DcMotorEx.RunMode.RUN_USING_ENCODER);
+        flyMotor.setVelocityPIDFCoefficients(60, 2, 0, 11.7);
+
+        // Follower motor runs velocity PID to match leader
         flyMotor2.setMode(DcMotorEx.RunMode.RUN_USING_ENCODER);
+        flyMotor2.setVelocityPIDFCoefficients(60, 2, 0, 11.7);
+
+        flyMotor.setDirection(DcMotorSimple.Direction.REVERSE);
+        flyMotor2.setDirection(DcMotorSimple.Direction.REVERSE);
+        flowerServo2.setDirection(Servo.Direction.REVERSE);
+
+        flowerServo.setPosition(0.1);   // Active position 1
+        flowerServo2.setPosition(0.1);  // Active position 2
 
         telemetry.addLine("Initialized Successfully");
         telemetry.update();
@@ -192,24 +217,6 @@ public class Blueee extends OpMode {
     public void start() {
         resetRuntime();
         currentTime = getRuntime();
-        xLast = false;
-    }
-
-    public void hoodCalc(double aprTagDist) {
-        final double SERVO_POS_INCREMENT = 0.12;
-        double[] dist = {130.0, 160.0, 190.0, 210.0, 230.0};
-
-        int bestIndex = 0;
-        double smallestError = Math.abs(aprTagDist - dist[0]);
-
-        for (int i = 1; i < dist.length; i++) {
-            double error = Math.abs(aprTagDist - dist[i]);
-            if (error < smallestError) {
-                smallestError = error;
-                bestIndex = i;
-            }
-        }
-
-        telemetry.addData("Hood index: %d", bestIndex);
+        xLastState = false;
     }
 }
