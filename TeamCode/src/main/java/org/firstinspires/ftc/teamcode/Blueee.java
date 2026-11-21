@@ -39,11 +39,16 @@ public class Blueee extends OpMode {
     double kD = 0.0;
     double kF = 0.4;
 
+    double[][] lookup = {{1790.0, 48.0}, {1760.0, 43.0}, {1690.0, 38.0}, {1640.0, 33.0}, {1630.0, 28.0}};
+
     // Flywheel variables
     double targetRPM = 0.0;
     final double TICKS_PER_REV_FLY = 28.0;
     double maxRPM = 6000.0;
     double ticksPerSecond = 0.0;
+
+    // Flywheel RPM you set from the controller (gamepad 1 D-pad). The right bumper runs the flywheel at this RPM.
+    double flywheelSetRPM = 1830.0;
 
     // Servo toggle variables for flower servos
     boolean flowerState = false;
@@ -52,6 +57,11 @@ public class Blueee extends OpMode {
     // Turret Target Toggle Variables (Gamepad 1 Y Button)
     boolean targetToggle = false; // false = Target Set A, true = Target Set B
     boolean yLastState = false;
+
+    // Gamepad 2 bumper edge detection (feedforward tuning)
+    boolean lbLast = false;
+    boolean rbLast = false;
+    boolean backLast = false;
 
     // Field Target Coordinates (Relative to start tile: Column 1, 3 tiles down = (0,0))
     // Target Set A (e.g., Primary Bucket)
@@ -70,6 +80,7 @@ public class Blueee extends OpMode {
     double turretZeroOffsetRad = 0.0;         // Offset if turret "0" isn't aligned with robot 0
     double turretKP = 0.80;                   // Proportional gain (power per radian of error)
     double turretKD = 0.02;                   // Damping gain (power per rad/s of turret speed)
+    double turretKFF = 1.2;                  // Feedforward (power per rad/s of robot spin). ~1/(turret free speed in rad/s); tune on gamepad 2 bumpers
     double turretMaxPower = 0.60;             // Max safe motor power
     double turretMinPower = 0.08;             // Small kick to overcome friction on the 60:1 reduction (0 to disable)
 
@@ -104,18 +115,7 @@ public class Blueee extends OpMode {
 
         // ---------------------- Mechanism Inputs -------------------------
 
-        // Flywheel Target RPM control via right bumper
-        if (gamepad1.right_bumper) {
-            targetRPM = 3150;
-        } else {
-            targetRPM = 0.0;
-        }
-
-        ticksPerSecond = (targetRPM * TICKS_PER_REV_FLY) / 60.0;
-
-        // Drive flywheels via velocity PID
-        flyMotor.setVelocity(ticksPerSecond);
-        flyMotor2.setVelocity(ticksPerSecond);
+        // (Flywheel control moved below the turret target math, since its RPM now depends on distance)
 
         // Flower Servo Toggle Logic using Gamepad 1 X Button
         boolean xPressedNow = gamepad1.x;
@@ -133,7 +133,9 @@ public class Blueee extends OpMode {
         }
 
         // Intake control on Gamepad 1 A Button
-        if (gamepad1.a) {
+        if (gamepad1.a && gamepad1.b) {
+            intakeMotor.setPower(-0.77);
+        } else if (gamepad1.a) {
             intakeMotor.setPower(-1.0);
         } else {
             intakeMotor.setPower(0.0);
@@ -169,6 +171,29 @@ public class Blueee extends OpMode {
         double dy = activeTargetY - robotY;
         double targetFieldAngleRad = Math.atan2(dy, dx);
 
+        // Straight-line distance from the robot to the active target (inches)
+        double distanceToTargetIn = Math.hypot(dx, dy);
+
+        // Flywheel RPM adjust (gamepad 1 D-pad): up/down = +/-50 RPM, right/left = +/-10 RPM
+        if (gamepad1.dpadUpWasPressed()) {flywheelSetRPM += 50.0;}
+        if (gamepad1.dpadDownWasPressed()) {flywheelSetRPM -= 50.0;}
+        if (gamepad1.dpadRightWasPressed()) {flywheelSetRPM += 10.0;}
+        if (gamepad1.dpadLeftWasPressed()) {flywheelSetRPM -= 10.0;}
+        flywheelSetRPM = Range.clip(flywheelSetRPM, 0.0, maxRPM);
+
+        // Flywheel: hold right bumper to spin up to the set RPM
+        if (gamepad1.right_bumper) {
+            targetRPM = flywheelSetRPM;
+        } else {
+            targetRPM = 0.0;
+        }
+
+        ticksPerSecond = (targetRPM * TICKS_PER_REV_FLY) / 60.0;
+
+        // Drive flywheels via velocity PID
+        flyMotor.setVelocity(ticksPerSecond);
+        flyMotor2.setVelocity(ticksPerSecond);
+
         // Where the turret ACTUALLY is right now (radians, relative to robot chassis)
         double turretAngleRad = turretMotor.getCurrentPosition()
                 / (TURRET_MOTOR_TICKS_PER_REV * TURRET_GEAR_RATIO) * 2.0 * Math.PI;
@@ -199,14 +224,25 @@ public class Blueee extends OpMode {
         double turretVelRadPerSec = turretMotor.getVelocity()
                 / (TURRET_MOTOR_TICKS_PER_REV * TURRET_GEAR_RATIO) * 2.0 * Math.PI;
 
+        // FEEDFORWARD: the robot spinning at omega (CCW positive) makes the target appear to rotate
+        // by -omega relative to the chassis, so the turret must counter-rotate at that speed.
+        // Off in test mode (fixed angle).
+        double robotOmegaRadPerSec = imu.getRobotAngularVelocity(AngleUnit.RADIANS).zRotationRate;
+        double targetVelRadPerSec = testMode ? 0.0 : -robotOmegaRadPerSec;
+        boolean targetMoving = Math.abs(targetVelRadPerSec) > 0.15; // ~9 deg/s
+
         double computedTurretPower = 0.0;
-        if (Math.abs(angleErrorRad) > deadbandRad) {
-            // P pushes toward the target, D brakes against speed so it doesn't overshoot
-            double rawPower = (angleErrorRad * turretKP) - (turretVelRadPerSec * turretKD);
+        // Hold the deadband only when the target is still; while it's moving keep tracking smoothly
+        if (Math.abs(angleErrorRad) > deadbandRad || targetMoving) {
+            // P pushes toward the target, D damps the speed MISMATCH, FF supplies the counter-rotation
+            double rawPower = (angleErrorRad * turretKP)
+                    + (targetVelRadPerSec - turretVelRadPerSec) * turretKD
+                    + (targetVelRadPerSec * turretKFF);
             computedTurretPower = Range.clip(rawPower, -turretMaxPower, turretMaxPower);
 
-            // Small friction kick, only if we're pushing toward the target
-            if (Math.abs(computedTurretPower) < turretMinPower
+            // Small friction kick, only outside the deadband and only if pushing toward the target
+            if (Math.abs(angleErrorRad) > deadbandRad
+                    && Math.abs(computedTurretPower) < turretMinPower
                     && Math.signum(computedTurretPower) == Math.signum(angleErrorRad)) {
                 computedTurretPower = Math.signum(angleErrorRad) * turretMinPower;
             }
@@ -226,7 +262,9 @@ public class Blueee extends OpMode {
         // FTC Dashboard Telemetry Streaming
         double actualRPM1 = (flyMotor.getVelocity() * 60.0) / TICKS_PER_REV_FLY;
         double actualRPM2 = (flyMotor2.getVelocity() * 60.0) / TICKS_PER_REV_FLY;
+        packet.put("Flywheel Set RPM", flywheelSetRPM);
         packet.put("Target RPM", targetRPM);
+        packet.put("Distance to Target (in)", distanceToTargetIn);
         packet.put("Actual RPM (Motor 1)", actualRPM1);
         packet.put("Actual RPM (Motor 2)", actualRPM2);
         packet.put("Turret Target Set", targetToggle ? "Target B" : "Target A");
@@ -244,6 +282,23 @@ public class Blueee extends OpMode {
         if (gamepad2.dpadUpWasPressed()) {turretKD += stepSizes[stepIndex];}
         if (gamepad2.dpadDownWasPressed()) {turretKD -= stepSizes[stepIndex];}
 
+        // Feedforward tuning: gamepad 2 left bumper = kFF down, right bumper = kFF up
+        boolean lbNow = gamepad2.left_bumper;
+        boolean rbNow = gamepad2.right_bumper;
+        if (lbNow && !lbLast) {turretKFF -= stepSizes[stepIndex];}
+        if (rbNow && !rbLast) {turretKFF += stepSizes[stepIndex];}
+        lbLast = lbNow;
+        rbLast = rbNow;
+
+        // RE-ZERO: if the turret slipped or got bumped, physically center it, then press gamepad 2 BACK
+        // to reset the encoder so this spot becomes 0 degrees again.
+        boolean backNow = gamepad2.back;
+        if (backNow && !backLast) {
+            turretMotor.setMode(DcMotor.RunMode.STOP_AND_RESET_ENCODER);
+            turretMotor.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
+        }
+        backLast = backNow;
+
         // Driver Station Telemetry
         double headingDeg = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.DEGREES);
         telemetry.addData("Heading (Deg)", "%.2f", headingDeg);
@@ -254,10 +309,14 @@ public class Blueee extends OpMode {
         telemetry.addData("Turret Error (Deg)", "%.2f", Math.toDegrees(angleErrorRad));
         telemetry.addData("Turret Power", "%.2f", computedTurretPower);
         telemetry.addData("Turret kP / kD", "%.4f / %.4f", turretKP, turretKD);
+        telemetry.addData("Turret kFF", "%.4f", turretKFF);
+        telemetry.addData("Robot spin (deg/s)", "%.1f", Math.toDegrees(robotOmegaRadPerSec));
         telemetry.addData("Tuning step", stepSizes[stepIndex]);
         telemetry.addData("Turret Test Mode", testMode ? "ON (fixed angle)" : "off (tracking)");
         telemetry.addData("At Soft Limit", hitSoftLimit);
-        telemetry.addData("Target RPM", targetRPM);
+        telemetry.addData("Flywheel Set RPM", "%.0f", flywheelSetRPM);
+        telemetry.addData("Flywheel Target RPM (live)", "%.0f", targetRPM);
+        telemetry.addData("Distance to Target (in)", "%.1f", distanceToTargetIn);
         telemetry.addData("Flower State", flowerState ? "Active" : "Home");
         telemetry.addData("RR X (Inches)", "%.2f", currentPose.position.x);
         telemetry.addData("RR Y (Inches)", "%.2f", currentPose.position.y);
@@ -307,10 +366,10 @@ public class Blueee extends OpMode {
 
         // Velocity PID configuration for flywheels
         flyMotor.setMode(DcMotorEx.RunMode.RUN_USING_ENCODER);
-        flyMotor.setVelocityPIDFCoefficients(60, 2, 0, 11.7);
+        flyMotor.setVelocityPIDFCoefficients(280, 0, 0, 35);
 
         flyMotor2.setMode(DcMotorEx.RunMode.RUN_USING_ENCODER);
-        flyMotor2.setVelocityPIDFCoefficients(60, 2, 0, 11.7);
+        flyMotor2.setVelocityPIDFCoefficients(280, 0, 0, 35);
 
         flyMotor.setDirection(DcMotorSimple.Direction.REVERSE);
         flyMotor2.setDirection(DcMotorSimple.Direction.REVERSE);
@@ -328,5 +387,8 @@ public class Blueee extends OpMode {
         resetRuntime();
         xLastState = false;
         yLastState = false;
+        lbLast = false;
+        rbLast = false;
+        backLast = false;
     }
 }
