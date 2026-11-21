@@ -39,7 +39,7 @@ public class Blueee extends OpMode {
     double kD = 0.0;
     double kF = 0.4;
 
-    double[][] lookup = {{1790.0, 48.0}, {1760.0, 43.0}, {1690.0, 38.0}, {1640.0, 33.0}, {1630.0, 28.0}};
+    double[][] lookup = {{1790.0, 48.0}, {1760.0, 43.0}, {1690.0, 38.0}, {1640.0, 33.0}, {1630.0, 28.0}, {1640.0, 23.0}};
 
     // Flywheel variables
     double targetRPM = 0.0;
@@ -125,8 +125,8 @@ public class Blueee extends OpMode {
         xLastState = xPressedNow;
 
         if (flowerState) {
-            flowerServo.setPosition(0.75);
-            flowerServo2.setPosition(0.75);
+            flowerServo.setPosition(0.3);
+            flowerServo2.setPosition(0.3);
         } else {
             flowerServo.setPosition(0.1);
             flowerServo2.setPosition(0.1);
@@ -183,7 +183,8 @@ public class Blueee extends OpMode {
 
         // Flywheel: hold right bumper to spin up to the set RPM
         if (gamepad1.right_bumper) {
-            targetRPM = flywheelSetRPM;
+            //targetRPM = flywheelSetRPM;
+            targetRPM = bestRPM(lookup, distanceToTargetIn);
         } else {
             targetRPM = 0.0;
         }
@@ -332,6 +333,20 @@ public class Blueee extends OpMode {
             angleRad += 2.0 * Math.PI;
         }
         return angleRad;
+    }
+
+    private double bestRPM(double[][] table, double distance) {
+        double bestRpm = 0.0;
+        double bestDiff = Double.MAX_VALUE;
+
+        for (double[] row : table) {
+            double diff = Math.abs(row[1] - distance); // row[0] = rpm, row[1] = distance
+            if (diff < bestDiff) {
+                bestDiff = diff;
+                bestRpm = row[0];
+            }
+        }
+        return bestRpm;
     }
 
     // ------------------ INIT METHODS ----------------------
